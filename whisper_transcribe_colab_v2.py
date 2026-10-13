@@ -1,42 +1,43 @@
 #@title 🇹🇼 OpenAI Whisper & Taiwan ASR 語音辨識 (繁體中文高精準與極速版 v2.0) { vertical-output: true }
 
-#@markdown <b>設定底下的自訂參數後，就可以按左側的執行鈕</b>
+#@markdown ---
+#@markdown <h3>1. 📁 輸入與輸出設定</h3>
 url = "/content/LY_Rec_gdrive_colab_paths.txt" #@param {type:"string"}
-lang = "Chinese" # @param ["Chinese", "English", "Japanese", "Korean", "自動判斷"] {allow-input: true}
-outputFormat = 'srt' #@param ['srt', 'txt', '.srt.txt']
-initial_prompt = "以下是繁體中文的句子" # @param ["", "以下是繁體中文的句子", "以下是台灣華語普通話的繁體中文句子。"] {allow-input: true}
+#@markdown <small>支援：本機/Google Drive 音檔路徑、批次清單文字檔 (.txt)、YouTube 影片/播放清單網址、Vocaroo 錄音網址</small>
 output_path = "/content/drive/MyDrive/LY Class Rec/" # @param {type:"string"}
-makedirs_enable = True #@param { type: 'boolean' }
+#@markdown <small>字幕輸出目錄（若目錄不存在將自動新增）</small>
+outputFormat = 'srt' #@param ['srt', 'txt', '.srt.txt']
 overwrite_enable = True #@param { type: 'boolean' }
+start_downloading_immediately = False #@param { type: 'boolean' }
+#@markdown <small>辨識完成後是否透過瀏覽器下載（若已輸出至 Google Drive 建議設為 False，避免觸發瀏覽器彈跳視窗封鎖）</small>
 
 #@markdown ---
-#@markdown <h3>🎯 模型選擇 (繁體中文最佳化)</h3>
+#@markdown <h3>2. 🎯 語音辨識模型與語言設定</h3>
 #@markdown <ul>
-#@markdown <li><b>shooding/faster-whisper-large-v3-zh-TW</b>：【推薦首選】採用數位發展部台灣在地語料庫 LoRA 微調，對台灣腔調、繁體在地詞彙精準度最高。</li>
-#@markdown <li><b>asadfgglie/faster-whisper-large-v3-zh-TW</b>：【極速推薦】基於最新 Turbo 架構微調 Common Voice 19 繁中，速度極快、顯存低。</li>
-#@markdown <li><b>sensevoice</b>：阿里 SenseVoice-Small，極速非自迴歸辨識（含 VAD 時間軸分段）。</li>
+#@markdown <li><b>shooding/faster-whisper-large-v3-zh-TW</b>：【🌟 推薦首選】採用數位發展部台灣在地語料庫 LoRA 微調，對台灣腔調、繁體在地詞彙精準度最高。</li>
+#@markdown <li><b>asadfgglie/faster-whisper-large-v3-zh-TW</b>：【⚡ 極速推薦】基於最新 Turbo 架構微調 Common Voice 19 繁中，速度極快、顯存低。</li>
+#@markdown <li><b>sensevoice</b>：阿里 SenseVoice-Small，極速非自迴歸辨識（推論速度比 Whisper 快 10~15 倍）。</li>
 #@markdown <li><b>large-v3-turbo / large-v3</b>：OpenAI 官方原版模型。</li>
 #@markdown </ul>
 modelType = "shooding/faster-whisper-large-v3-zh-TW" # @param ["shooding/faster-whisper-large-v3-zh-TW", "asadfgglie/faster-whisper-large-v3-zh-TW", "large-v3-turbo", "sensevoice", "large-v3", "large-v2", "medium", "small"] {allow-input: true}
-
-start_downloading_immediately = True #@param { type: 'boolean' }
-debug = True #@param { type: 'boolean' }
+lang = "Chinese" # @param ["Chinese", "自動判斷", "English", "Japanese", "Korean"] {allow-input: true}
+initial_prompt = "以下是繁體中文的句子" # @param ["以下是繁體中文的句子", "以下是台灣華語普通話的繁體中文句子。", ""] {allow-input: true}
+#@markdown <small>提示詞（Whisper 專用，可用於引導專有名詞；SenseVoice 模型將自動略過）</small>
 
 #@markdown ---
-#@markdown <h3>字幕排版與進階參數</h3>
+#@markdown <h3>3. ✂️ 字幕排版與折行控制</h3>
+#@markdown <small>系統會自動清理中文多餘空白。若設定每行字數或寬度，系統將<b>自動啟用單字級時間戳 (word_timestamps)</b> 進行智慧排版。</small>
 verbose = True #@param { type: 'boolean' }
-word_timestamps = False #@param { type: 'boolean' }
 max_words_per_line = 0 # @param {type:"integer"}
 max_line_width = 0 # @param {type:"integer"}
-max_line_count = 0 # @param {type:"integer"}
-highlight_words = False #@param { type: 'boolean' }
+max_line_count = 1 # @param {type:"integer"}
+word_timestamps = False #@param { type: 'boolean' }
 
 #@markdown ---
-#@markdown <h3><font color="red">YouTube 下載問題解決方案</font></h3>
-#@markdown <p>如果遇到 "Sign in to confirm you're not a bot" 錯誤，請依照以下步驟操作：</p>
-#@markdown <ol><li>在您本機的 Chrome/Firefox 瀏覽器安裝 "Get cookies.txt LOCALLY" 擴充功能。</li><li>登入 YouTube 後，點擊該擴充功能圖示，匯出 `youtube.com_cookies.txt` 檔案。</li><li><b>將該檔案重新命名為 `cookies.txt`</b>。</li><li>在左側檔案列表中，上傳 `cookies.txt` 檔案。</li></ol>
+#@markdown <h3>💡 YouTube 下載提示</h3>
+#@markdown <p>如果遇到 "Sign in to confirm you're not a bot" 錯誤，請在本地 Chrome/Firefox 安裝 "Get cookies.txt LOCALLY" 擴充套件，匯出 YouTube cookies 並命名為 <code>cookies.txt</code>，上傳至左側檔案區即可。</p>
 #@markdown ---
-#@markdown <center><p><font color="blue">以下為指令輸出內容</p></center>
+#@markdown <center><p><font color="blue">▼ 執行進度與輸出內容 ▼</p></center>
 
 # ==============================================================================
 # 1. 基礎宣告與背景環境安裝 (防範 ModuleNotFoundError 與版本衝突)
@@ -57,7 +58,10 @@ print(">> 正在檢查並設定最佳執行環境 (v2.0 繁中最佳化版)...")
 # 檢查 ffmpeg
 if not shutil.which('ffmpeg'):
     print(">> 偵測到環境缺少 ffmpeg，正在背景安裝...")
-    get_ipython().system('apt-get install -y -qq ffmpeg > /dev/null 2>&1')
+    try:
+        get_ipython().system('apt-get install -y -qq ffmpeg > /dev/null 2>&1')
+    except Exception:
+        subprocess.run(["apt-get", "install", "-y", "-qq", "ffmpeg"], check=False)
 
 # 升級 yt-dlp
 print(">> 正在檢查並更新 yt-dlp 至最新版本...")
@@ -187,9 +191,14 @@ else:
 # ==============================================================================
 from yt_dlp import YoutubeDL
 from opencc import OpenCC
-import google.colab.files
 
-print("✅ 環境已就緒，開始執行辨識程式...")
+try:
+    import google.colab.files
+    HAS_COLAB_FILES = True
+except ImportError:
+    HAS_COLAB_FILES = False
+
+print("✅ 環境已就緒，開始進行參數檢查與前置作業...")
 
 # 臺灣標準繁體中文轉換器 (二次把關，確保 100% 臺灣繁體中文)
 cc = OpenCC('s2t')
@@ -211,7 +220,54 @@ def clean_chinese_spacing(text):
     return text.strip()
 
 # ==============================================================================
-# 3. 輔助函式與變數
+# 3. 參數智慧防呆、校驗與自動修正 (Foolproofing & Guardrails)
+# ==============================================================================
+# 基礎清理
+url = url.strip().strip('"').strip("'")
+output_path = output_path.strip().strip('"').strip("'")
+initial_prompt = initial_prompt.strip()
+
+# 必填檢查
+if not url:
+    raise ValueError("❌ [防呆錯誤] 請在上方填寫有效的音訊來源路徑或網址 (url)！")
+
+# 輸出路徑預設與自動建立
+if not output_path:
+    output_path = "."
+os.makedirs(output_path, exist_ok=True)
+
+# Google Drive 自動掛載防呆
+if (url.startswith('/content/drive') or output_path.startswith('/content/drive')) and not os.path.exists('/content/drive/MyDrive'):
+    print(">> 偵測到使用 Google Drive 但尚未掛載，嘗試自動掛載雲端硬碟...")
+    try:
+        from google.colab import drive
+        drive.mount('/content/drive')
+    except Exception as e:
+        print(f"⚠️ 無法自動掛載 Google Drive ({e})，若檔案在雲端硬碟請先手動完成授權。")
+
+# 本地檔案/清單檔案存在性檢查 (排除網址)
+if not url.startswith('http://') and not url.startswith('https://'):
+    if url.lower().endswith('.txt'):
+        if not os.path.exists(url):
+            raise FileNotFoundError(f"❌ [防呆錯誤] 找不到指定的清單文字檔: {url}\n請確認檔案已上傳至 Colab 或路徑是否正確。")
+    elif not os.path.exists(url):
+        raise FileNotFoundError(f"❌ [防呆錯誤] 找不到指定的音訊檔案: {url}\n若位於 Google Drive，請確認左側雲端硬碟是否已成功掛載。")
+
+# 智慧防呆：若有設定折行限制，自動啟用 word_timestamps
+if (max_words_per_line > 0 or max_line_width > 0) and not word_timestamps:
+    if modelType.lower() != 'sensevoice':
+        print(">> 💡 [防呆優化] 偵測到已設定每行字數/寬度限制，自動啟用單字級時間戳 (word_timestamps=True) 進行智慧折行。")
+        word_timestamps = True
+
+# 模型與參數相容性防呆提示
+if modelType.lower() == 'sensevoice':
+    if initial_prompt:
+        print(f">> ℹ️ [防呆提示] SenseVoice 模型不支援 initial_prompt ('{initial_prompt}')，執行時將自動略過。")
+    if max_words_per_line > 0 or max_line_width > 0:
+        print(">> ℹ️ [防呆提示] SenseVoice 時間軸由 VAD 分句產生，不支援單字級重新折行，將以語音句子為單位輸出字幕。")
+
+# ==============================================================================
+# 4. 輔助函式與變數初始化
 # ==============================================================================
 audioFile = 'source.mp3'
 tempFolder = '.'
@@ -224,16 +280,6 @@ renameSrtToTxt = False
 if outputFormat == '.srt.txt':
     outputFormat = 'srt'
     renameSrtToTxt = True
-
-if not output_path.strip():
-    output_path = tempFolder
-else:
-    if not os.path.exists(output_path) and makedirs_enable:
-        print(f'指定的輸出目錄 {output_path} 不存在,\n>>>> 新增: {output_path}')
-        os.makedirs(output_path)
-    elif not os.path.isdir(output_path):
-        print(f'{output_path} 不是資料夾哦! 改用預設值: {tempFolder}')
-        output_path = tempFolder
 
 def getYoutubePlaylistInfo_ydl(url):
     ydl_opts = {'no_warnings': True, 'quiet': True, 'extract_flat': True}
@@ -338,7 +384,7 @@ def segment_to_srt(index, start, end, text):
     return f"{index}\n{format_ts(start)} --> {format_ts(end)}\n{text}\n\n"
 
 # ==============================================================================
-# 4. 語音辨識核心邏輯 (v2.0 支援繁中在地微調模型與 SenseVoice)
+# 5. 語音辨識核心邏輯 (支援繁中在地微調模型、SenseVoice 與語言防呆)
 # ==============================================================================
 def transcribe(audioFilename, output_path, outputFilename, outputFormat):
     print('\n>>>>> 載入模型...')
@@ -347,6 +393,16 @@ def transcribe(audioFilename, output_path, outputFilename, outputFormat):
         print('\n>>> 正在使用阿里 SenseVoice-Small 模型進行極速辨識...')
         from funasr import AutoModel
 
+        # 語言設定防呆轉換
+        sv_lang_map = {
+            "Chinese": "zh",
+            "English": "en",
+            "Japanese": "ja",
+            "Korean": "ko",
+            "自動判斷": "auto"
+        }
+        sv_lang = sv_lang_map.get(lang, "auto")
+
         model = AutoModel(
             model="iic/SenseVoiceSmall",
             vad_model="fsmn-vad",
@@ -354,7 +410,7 @@ def transcribe(audioFilename, output_path, outputFilename, outputFormat):
             device=DEVICE,
             disable_update=True
         )
-        result_raw = model.generate(input=audioFilename, language="auto", use_itn=True)
+        result_raw = model.generate(input=audioFilename, language=sv_lang, use_itn=True)
 
         result = {'segments': []}
         if result_raw and result_raw[0].get("sentence_info"):
@@ -407,7 +463,16 @@ def transcribe(audioFilename, output_path, outputFilename, outputFormat):
         if initial_prompt:
             args['initial_prompt'] = initial_prompt
 
-        if lang != "自動判斷":
+        # 語言對應與繁中專用模型防呆
+        if "zh-tw" in modelType.lower() or "zh_tw" in modelType.lower():
+            # 繁中微調模型直接指定中文，避免語言偵測的額外開銷與誤判
+            if lang == "自動判斷" or lang == "Chinese":
+                args['language'] = 'zh'
+            else:
+                lang_mapping = {"English": "en", "Japanese": "ja", "Korean": "ko"}
+                if lang in lang_mapping:
+                    args['language'] = lang_mapping[lang]
+        elif lang != "自動判斷":
             lang_mapping = {
                 "Chinese": "zh",
                 "English": "en",
@@ -587,7 +652,7 @@ def parseTxtFileAndTranscribe(txtFile):
         getAudioAndTranscribe(full_path)
 
 # ==============================================================================
-# 5. 主執行區
+# 6. 主執行區
 # ==============================================================================
 removeAudioFile(audioFile)
 
@@ -610,12 +675,13 @@ else:
     except Exception:
         title = getAudioAndTranscribe(url)
 
+# 依設定進行自動下載
 if textFileList and start_downloading_immediately:
     print('\n>> 準備下載結果...')
     valid_files = [f for f in textFileList if os.path.exists(f)]
     if not valid_files:
         print(">> 沒有產生任何可下載的檔案。")
-    else:
+    elif HAS_COLAB_FILES:
         for textFile in valid_files: convertNewLineFormat(textFile)
         if len(valid_files) > 1:
             print('\n>> 壓縮並下載辨識結果...')
@@ -626,3 +692,5 @@ if textFileList and start_downloading_immediately:
         else:
             print('\n>> 下載辨識結果...')
             google.colab.files.download(valid_files[0])
+    else:
+        print(">> 偵測到非 Google Colab 環境，跳過瀏覽器自動下載，檔案已完整保存在 output_path。")

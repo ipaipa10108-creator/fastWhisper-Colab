@@ -42,6 +42,14 @@ v2.0 版本全面升級，引入 **Hugging Face 台灣華語在地微調模型**
 * **自訂字幕折行器**：支援指定每行最大字數（`max_words_per_line`）或最大寬度（`max_line_width`），避免單行字幕過長影響閱讀。
 * **臺灣標準繁體把關**：全文字流經 OpenCC 繁體（臺灣標準）二次校準。
 
+### 5. 🧹 介面參數精簡與智慧防呆機制 (Guardrails)
+* **剔除無效死碼參數**：徹底移除舊版無任何程式引用的無效參數（如 `debug`、`highlight_words`、`makedirs_enable` 等），讓 Colab 介面保持最清爽乾淨的狀態。
+* **折行連動自動開啟**：只要使用者設定了每行字數或寬度限制，系統將**自動連動啟用單字級時間戳 (`word_timestamps=True`)**，避免使用者因忘記打勾而導致折行功能靜默失效。
+* **多模型參數相容提示**：
+  * 當選用 `sensevoice` 時，自動略過不支援的 `initial_prompt`，並提示時間軸由 VAD 斷句維持整句輸出。
+  * 選擇 `zh-TW` 專用微調模型時，自動將語言鎖定為中文 (`zh`)，省去語言偵測開銷。
+* **Google Drive 自動偵測與路徑清理**：自動清除路徑前後空白與單雙引號；若路徑位於雲端硬碟但尚未掛載，自動觸發 `drive.mount`。
+
 ---
 
 ## 📊 模型對照與選型指南
@@ -66,17 +74,23 @@ v2.0 版本全面升級，引入 **Hugging Face 台灣華語在地微調模型**
 2. 全選並複製所有內容，貼入 Colab 的第一個儲存格中。
 
 ### 步驟 3：設定參數並執行
-Colab 會自動將頂部參數渲染為互動式表單，常見設定如下：
+Colab 會自動將頂部參數渲染為互動式表單，主要分區如下：
 
-| 參數名稱 | 說明 | 範例 / 預設值 |
-| :--- | :--- | :--- |
-| `url` | 音訊來源（支援本機路徑、Google Drive 路徑、清單檔 `.txt`、YouTube 網址/播放清單、Vocaroo） | `/content/drive/MyDrive/record.mp3` |
-| `modelType` | 選擇 ASR 模型 | `shooding/faster-whisper-large-v3-zh-TW` |
-| `outputFormat` | 輸出格式 (`srt` / `txt` / `.srt.txt`) | `srt` |
-| `output_path` | 字幕輸出目錄（可直接指定 Google Drive 資料夾） | `/content/drive/MyDrive/Subtitles/` |
-| `overwrite_enable` | 若輸出檔案已存在是否覆蓋 | `True` |
-| `word_timestamps` | 是否開啟單字級時間戳（折行器需要啟用此項） | `False` |
-| `max_words_per_line` | 每行字幕最大字數（設為 0 表示不限制） | `0` (例如：`18`) |
+| 參數分區 | 參數名稱 | 說明 | 範例 / 預設值 |
+| :--- | :--- | :--- | :--- |
+| **1. 輸入與輸出** | `url` | 音訊來源（路徑、`.txt` 清單、YouTube、Vocaroo） | `/content/drive/MyDrive/record.mp3` |
+| | `output_path` | 字幕儲存目錄（支援 Google Drive，自動建立） | `/content/drive/MyDrive/Subtitles/` |
+| | `outputFormat` | 輸出格式 (`srt` / `txt` / `.srt.txt`) | `srt` |
+| | `overwrite_enable` | 是否覆蓋已存在的字幕檔 | `True` |
+| | `start_downloading_immediately` | 完成後是否透過瀏覽器彈出下載 | `False` |
+| **2. 模型與語言** | `modelType` | 選擇 ASR 模型 | `shooding/faster-whisper-large-v3-zh-TW` |
+| | `lang` | 語言設定 | `Chinese` |
+| | `initial_prompt` | 提示詞（Whisper 專用，引導專有名詞） | `以下是繁體中文的句子` |
+| **3. 排版與折行** | `verbose` | 是否即時輸出解譯文字 | `True` |
+| | `max_words_per_line` | 每行字幕最大字數（>0 時自動啟用單字時間戳折行） | `0` (例如：`18`) |
+| | `max_line_width` | 每行字幕最大寬度（>0 時自動啟用單字時間戳折行） | `0` |
+| | `max_line_count` | 單個字幕塊最大行數 | `1` |
+| | `word_timestamps` | 是否強制啟用單字級時間戳 | `False` |
 
 設定完成後，點擊儲存格左側的 **「執行」按鈕 (Play)** 即可！
 
