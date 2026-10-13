@@ -1,0 +1,519 @@
+#@title OpenAI Whisper & FunASR 語音辨識 (終極效能繁體中文版 v6.1) { vertical-output: true }
+
+#@markdown <b>設定底下的自訂參數後，就可以按左側的執行鈕</b>
+url = "/content/LY_Rec_gdrive_colab_paths.txt" #@param {type:"string"}
+lang = "Chinese" # @param ["Chinese", "English", "Japanese", "Korean", "\u81EA\u52D5\u5224\u65B7"] {allow-input: true}
+outputFormat = 'srt' #@param ['srt', 'txt', '.srt.txt']
+initial_prompt = "\u4EE5\u4E0B\u662F\u7E41\u9AD4\u4E2D\u6587\u7684\u53E5\u5B50" # @param ["", "\u4EE5\u4E0B\u662F\u7E41\u9AD4\u4E2D\u6587\u7684\u53E5\u5B50", "\u4EE5\u4E0B\u662F\u666E\u901A\u8BDD\u7684\u53E5\u5B50\u3002"] {allow-input: true}
+output_path = "/content/drive/MyDrive/LY Class Rec/" # @param {type:"string"}
+makedirs_enable = True #@param { type: 'boolean' }
+overwrite_enable = True #@param { type: 'boolean' }
+modelType = "large-v3-turbo" # @param ["funasr", "large-v3-turbo","large-v2", "large-v3", "turbo", "large", "medium", "small"] {allow-input: true}
+start_downloading_immediately = True #@param { type: 'boolean' }
+debug = True #@param { type: 'boolean' }
+
+#@markdown ---
+#@markdown <h3>FunASR 專用參數</h3>
+disable_funasr_update = True #@param {type:"boolean"}
+funasr_vad_enable = True #@param {type:"boolean"}
+
+#@markdown ---
+#@markdown <h3>Whisper 專用參數</h3>
+verbose = True #@param { type: 'boolean' }
+word_timestamps = False #@param { type: 'boolean' }
+max_words_per_line = 0 # @param {type:"integer"}
+max_line_width = 0 # @param {type:"integer"}
+max_line_count = 0 # @param {type:"integer"}
+highlight_words = False #@param { type: 'boolean' }
+
+#@markdown ---
+#@markdown <h3><font color="red">YouTube 下載問題解決方案</font></h3>
+#@markdown <p>如果遇到 "Sign in to confirm you're not a bot" 錯誤，請依照以下步驟操作：</p>
+#@markdown <ol><li>在您本機的 Chrome/Firefox 瀏覽器安裝 "Get cookies.txt LOCALLY" 擴充功能。</li><li>登入 YouTube 後，點擊該擴充功能圖示，匯出 `youtube.com_cookies.txt` 檔案。</li><li><b>將該檔案重新命名為 `cookies.txt`</b>。</li><li>在左側檔案列表中，上傳 `cookies.txt` 檔案。</li></ol>
+#@markdown ---
+#@markdown <center><p><font color="blue">以下為指令輸出內容</p></center>
+
+# ==============================================================================
+# 1. 基礎宣告與背景環境安裝 (最頂部只 import Python 內建標準庫，防範 ModuleNotFoundError)
+# ==============================================================================
+import sys
+import os
+import re
+import urllib.request
+import subprocess
+import tempfile
+import shutil
+import importlib
+
+print(">> 正在檢查並設定最佳執行環境...")
+
+# 智慧型檢查 ffmpeg，避免每次都跑 apt-get update 觸發警告與耗時
+if not shutil.which('ffmpeg'):
+    print(">> 偵測到環境缺少 ffmpeg，正在背景安裝...")
+    get_ipython().system('apt-get install -y -qq ffmpeg > /dev/null 2>&1')
+
+# 升級 yt-dlp (背景執行，避免顯示過多 pip 安裝雜訊)
+print(">> 正在檢查並更新 yt-dlp 至最新版本...")
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "yt-dlp"])
+print(">> yt-dlp 更新完成。")
+
+# 免重啟動態安裝與載入機制
+def install_and_import(packages_dict):
+    installed_any = False
+    for import_name, install_name in packages_dict.items():
+        try:
+            importlib.import_module(import_name)
+        except ImportError:
+            print(f">> 偵測到未安裝 {import_name}，正在背景下載並安裝 {install_name}，免手動重啟工作階段...")
+            cmd = [sys.executable, "-m", "pip", "install", "-q", "--no-cache-dir"] + install_name.split()
+            subprocess.run(cmd, check=True)
+            installed_any = True
+
+    if installed_any:
+        # 重整 python 匯入快取，讓當前 cell 內可直接 import
+        importlib.invalidate_caches()
+
+# 必備的通用套件
+common_packages = {
+    "slugify": "python-slugify",
+    "opencc": "opencc-python-reimplemented",
+    "yt_dlp": "yt-dlp"
+}
+install_and_import(common_packages)
+
+# 依據模型選擇進行套件安裝
+if modelType.lower() == 'funasr':
+    funasr_packages = {
+        "funasr": "funasr",
+        "torch": "torch torchaudio",
+    }
+    install_and_import(funasr_packages)
+else:
+    whisper_packages = {
+        "faster_whisper": "faster-whisper"
+    }
+    install_and_import(whisper_packages)
+
+# ==============================================================================
+# 2. 確定安裝完成後，才載入第三方擴充庫與 Colab 專用庫
+# ==============================================================================
+from slugify import slugify
+from yt_dlp import YoutubeDL
+from opencc import OpenCC
+import google.colab.files
+
+print("✅ 環境已就緒，開始執行辨識程式...")
+
+# 載入繁簡轉換器 (OpenCC) 確保 100% 完美的台灣繁體中文輸出
+cc = OpenCC('s2t') # 簡體轉繁體 (臺灣標準)
+
+def to_traditional(text):
+    if not text:
+        return ""
+    return cc.convert(text)
+
+# 移除中文字元之間的冗餘空格，保留英文單字間的空格 (解決官方 Whisper 的中文空格通病)
+def clean_chinese_spacing(text):
+    if not text:
+        return ""
+    # 移除中文字與中文字之間的空格
+    pattern = re.compile(r'([\u4e00-\u9fff])\s+([\u4e00-\u9fff])')
+    while pattern.search(text):
+        text = pattern.sub(r'\1\2', text)
+    # 移除中文與標點符號之間的空格
+    text = re.compile(r'([\u4e00-\u9fff])\s+([，。！？、；：「」『』（）])').sub(r'\1\2', text)
+    text = re.compile(r'([，。！？、；：「」『』（）])\s+([\u4e00-\u9fff])').sub(r'\1\2', text)
+    return text.strip()
+
+# ==============================================================================
+# 3. 輔助函式與核心邏輯
+# ==============================================================================
+audioFile = 'source.mp3'
+tempFolder = '.'
+title = ''
+textFileList = []
+import torch
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+renameSrtToTxt = False
+if outputFormat == '.srt.txt':
+    outputFormat = 'srt'
+    renameSrtToTxt = True
+
+if not output_path.strip():
+    output_path = tempFolder
+else:
+    if not os.path.exists(output_path) and makedirs_enable:
+        print(f'指定的輸出目錄 {output_path} 不存在,\n>>>> 新增: {output_path}')
+        os.makedirs(output_path)
+    elif not os.path.isdir(output_path):
+        print(f'{output_path} 不是資料夾哦! 改用預設值: {tempFolder}')
+        output_path = tempFolder
+
+def getYoutubePlaylistInfo_ydl(url):
+    ydl_opts = {'no_warnings': True, 'quiet': True, 'extract_flat': True}
+    if os.path.exists("cookies.txt"):
+        ydl_opts['cookiefile'] = 'cookies.txt'
+    with YoutubeDL(ydl_opts) as ydl:
+        return ydl.extract_info(url, download=False)
+
+def getAudioFromYoutube_ydl(url, output_path, outputFilename):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        download_command = ["yt-dlp", "-f", "ba", "-P", temp_dir, url]
+        if os.path.exists("cookies.txt"):
+             print(">> 偵測到 cookies.txt，將使用 Cookie 進行下載...")
+             download_command.extend(["--cookies", "cookies.txt"])
+
+        result = subprocess.run(download_command, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(result.returncode, result.args, output=result.stdout, stderr=result.stderr)
+
+        downloaded_files = os.listdir(temp_dir)
+        if not downloaded_files:
+            raise FileNotFoundError("yt-dlp 下載失敗，目錄中沒有檔案。")
+        source_audio_path = os.path.join(temp_dir, downloaded_files[0])
+
+        target_path = os.path.join(output_path, outputFilename)
+        convert_command = ["ffmpeg", "-i", source_audio_path, "-q:a", "0", "-map", "a", "-y", target_path]
+        subprocess.run(convert_command, check=True, capture_output=True, text=True)
+
+def getVocarooMP3URL(url):
+    match = re.search(r'(https://voca\.ro|https://vocaroo\.com)/(\w{12})', url)
+    return f"https://media.vocaroo.com/mp3/{match.group(2)}" if match else url
+
+# 針對中文字幕排版特別優化的分行折行器 (不會產生多餘英文空格)
+def split_segment_by_limits(words, max_words, max_width, max_lines=1):
+    lines = []
+    current_line_words = []
+    current_line_len = 0
+
+    for w in words:
+        word_text = w['word']
+        word_len = len(word_text)
+
+        too_many_words = (max_words > 0 and len(current_line_words) >= max_words)
+        too_long = (max_width > 0 and current_line_len + word_len > max_width)
+
+        if too_many_words or too_long:
+            if current_line_words:
+                lines.append(current_line_words)
+                current_line_words = [w]
+                current_line_len = word_len
+            else:
+                current_line_words.append(w)
+                current_line_len += word_len
+        else:
+            current_line_words.append(w)
+            current_line_len += word_len
+
+    if current_line_words:
+        lines.append(current_line_words)
+
+    srt_segments = []
+    if max_lines <= 0:
+        max_lines = 1
+
+    for i in range(0, len(lines), max_lines):
+        chunk_lines = lines[i:i+max_lines]
+        if not chunk_lines:
+            continue
+        group_start = chunk_lines[0][0]['start']
+        group_end = chunk_lines[-1][-1]['end']
+
+        line_texts = []
+        for line in chunk_lines:
+            line_text = "".join([x['word'] for x in line]).strip()
+            line_texts.append(line_text)
+
+        srt_segments.append({
+            'start': group_start,
+            'end': group_end,
+            'text': "\n".join(line_texts)
+        })
+
+    return srt_segments
+
+def format_ts(ts):
+    h = int(ts // 3600)
+    m = int((ts % 3600) // 60)
+    s = int(ts % 60)
+    ms = int(round((ts % 1) * 1000))
+    if ms == 1000:
+        s += 1
+        ms = 0
+        if s == 60:
+            m += 1
+            s = 0
+            if m == 60:
+                h += 1
+                m = 0
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+def segment_to_srt(index, start, end, text):
+    return f"{index}\n{format_ts(start)} --> {format_ts(end)}\n{text}\n\n"
+
+# ==============================================================================
+# 4. 語音辨識核心邏輯 (整合 Faster-Whisper & FunASR)
+# ==============================================================================
+def transcribe(audioFilename, output_path, outputFilename, outputFormat):
+    print('\n>>>>> 載入模型...')
+
+    if modelType.lower() == 'funasr':
+        print('\n>>> 正在使用 FunASR 模型進行辨識...')
+        from funasr import AutoModel
+        vad_model_name = "fsmn-vad" if funasr_vad_enable else None
+        if vad_model_name:
+            print('>>> VAD (語音活動檢測) 已啟用。')
+
+        model = AutoModel(model="paraformer-zh", vad_model=vad_model_name, device=DEVICE, disable_update=disable_funasr_update)
+        result_raw = model.generate(input=audioFilename, batch_size_s=300)
+
+        result = {'segments': []}
+        if result_raw and result_raw[0].get("sentence_info"):
+            for res in result_raw[0]["sentence_info"]:
+                result['segments'].append({
+                    'start': res.get('start', 0) / 1000.0,
+                    'end': res.get('end', 0) / 1000.0,
+                    'text': to_traditional(res.get('text', ''))
+                })
+        print('>>> FunASR 辨識完成！')
+
+    else:
+        # 核心優化：採用更輕量、更穩定、快 4-5 倍的 Faster-Whisper 核心
+        from faster_whisper import WhisperModel
+        print(f'\n>>> 正在載入 faster-whisper 模型 ({modelType})...')
+
+        # 偵測硬體，決定運算精準度 (GPU 啟用 float16，大幅提升速度與品質)
+        compute_type = "float16" if DEVICE == "cuda" else "default"
+
+        # 模型對應轉換
+        model_mapping = {
+            "large-v3-turbo": "turbo",
+            "turbo": "turbo",
+            "large-v3": "large-v3",
+            "large-v2": "large-v2",
+            "large": "large-v3",
+            "medium": "medium",
+            "small": "small"
+        }
+        model_size = model_mapping.get(modelType.lower(), modelType)
+
+        model = WhisperModel(model_size, device=DEVICE, compute_type=compute_type)
+        print('\n>>> 開始解譯......')
+
+        args = {
+            'beam_size': 5,
+            'word_timestamps': word_timestamps,
+        }
+        if initial_prompt:
+            args['initial_prompt'] = initial_prompt
+
+        if lang != "自動判斷":
+            lang_mapping = {
+                "Chinese": "zh",
+                "English": "en",
+                "Japanese": "ja",
+                "Korean": "ko"
+            }
+            if lang in lang_mapping:
+                args['language'] = lang_mapping[lang]
+
+        segments, info = model.transcribe(audioFilename, **args)
+
+        result = {'segments': []}
+        for segment in segments:
+            seg_text = to_traditional(segment.text)
+            if verbose:
+                # 即時流式輸出辨識結果
+                print(f"[{format_ts(segment.start)} --> {format_ts(segment.end)}] {clean_chinese_spacing(seg_text)}")
+
+            words_list = []
+            if word_timestamps and segment.words:
+                for w in segment.words:
+                    words_list.append({
+                        'start': w.start,
+                        'end': w.end,
+                        'word': to_traditional(w.word)
+                    })
+
+            result['segments'].append({
+                'start': segment.start,
+                'end': segment.end,
+                'text': seg_text,
+                'words': words_list if word_timestamps else None
+            })
+
+        print('>>> Whisper 辨識完成！')
+
+    saveToFile(result, output_path, outputFilename, outputFormat)
+    if renameSrtToTxt:
+        pathSrt = os.path.join(output_path, f"{outputFilename}.{outputFormat}")
+        pathSrtTxt = pathSrt + '.txt'
+        if os.path.exists(pathSrt):
+            os.rename(pathSrt, pathSrtTxt)
+
+def saveToFile(result, output_path, filename, fileType='srt'):
+    if not result or not result.get('segments'):
+        print(f"警告：模型 '{modelType}' 未返回任何可辨識的片段。")
+        return
+
+    output_filepath = os.path.join(output_path, f"{filename}.{fileType}")
+    os.makedirs(output_path, exist_ok=True)
+
+    if fileType == 'txt':
+        with open(output_filepath, "w", encoding="utf-8") as f:
+            full_text = "，".join([seg['text'].strip() for seg in result['segments']])
+            full_text = clean_chinese_spacing(to_traditional(full_text))
+            f.write(full_text)
+
+    elif fileType == 'srt':
+        with open(output_filepath, "w", encoding="utf-8") as f:
+            srt_index = 1
+            for seg in result['segments']:
+                words = seg.get('words')
+                # 判斷是否需要按字數或寬度限制重新折行
+                if word_timestamps and words and (max_words_per_line > 0 or max_line_width > 0):
+                    sub_segments = split_segment_by_limits(
+                        words,
+                        max_words=max_words_per_line,
+                        max_width=max_line_width,
+                        max_lines=max_line_count
+                    )
+                    for sub_seg in sub_segments:
+                        text = clean_chinese_spacing(to_traditional(sub_seg['text']))
+                        f.write(segment_to_srt(srt_index, sub_seg['start'], sub_seg['end'], text))
+                        srt_index += 1
+                else:
+                    text = clean_chinese_spacing(to_traditional(seg['text']))
+                    f.write(segment_to_srt(srt_index, seg['start'], seg['end'], text))
+                    srt_index += 1
+
+    print(f">> 已成功儲存結果至: {output_filepath}")
+
+def getFilenameFromTitle(title):
+    return slugify(title, allow_unicode=True, lowercase=False)
+
+def getOutputTextFilename(filename):
+    ext = outputFormat + ('.txt' if renameSrtToTxt else '')
+    return os.path.join(output_path, f"{filename}.{ext}")
+
+def isOutputTextFileExists(filename):
+    return os.path.exists(getOutputTextFilename(filename))
+
+def removeAudioFile(filename):
+    if os.path.exists(filename): os.remove(filename)
+
+def convertNewLineFormat(filename):
+    if not os.path.exists(filename): return
+    try:
+        with open(filename, 'r+', encoding='utf-8') as f:
+            data = f.read().replace('\r\n', '\n').replace('\r', '\n')
+            f.seek(0); f.write(data); f.truncate()
+    except Exception as e:
+        print(f"處理檔案 {filename} 換行時出錯: {e}")
+
+def getAudioAndTranscribe(urlOrFile):
+    title, outputFilename, local_audio_file = None, None, None
+
+    if 'https://' in urlOrFile:
+        print('>> 處理網址: ' + urlOrFile)
+        title = 'web_source_' + str(hash(urlOrFile))[-6:]
+        local_audio_file = audioFile
+
+        outputFilename = getFilenameFromTitle(title)
+        if isOutputTextFileExists(outputFilename) and not overwrite_enable:
+            print('>>>檔案已存在，跳過。')
+            textFileList.append(getOutputTextFilename(outputFilename))
+            return title
+
+        print('>> 下載影音檔案中...')
+        try:
+            removeAudioFile(local_audio_file)
+            if 'voca.ro' in urlOrFile or 'vocaroo.com' in urlOrFile:
+                 urllib.request.urlretrieve(getVocarooMP3URL(urlOrFile), local_audio_file)
+            else:
+                 getAudioFromYoutube_ydl(urlOrFile, tempFolder, local_audio_file)
+
+            if 'youtube.' in urlOrFile or 'youtu.' in urlOrFile:
+                 info = getYoutubePlaylistInfo_ydl(urlOrFile)
+                 title = info.get('title', title)
+        except subprocess.CalledProcessError as e:
+            print(f'>>> 無法由網址下載影音: \n--- yt-dlp 錯誤訊息 ---\n{e.stderr}')
+            return None
+        except Exception as e:
+            print(f'>>> 無法由網址下載影音: {e}')
+            return None
+    else:
+        print('>> 處理本地檔案: ' + urlOrFile)
+        title = os.path.splitext(os.path.basename(urlOrFile))[0]
+        local_audio_file = urlOrFile
+
+    outputFilename = getFilenameFromTitle(title)
+    textFileList.append(getOutputTextFilename(outputFilename))
+
+    if isOutputTextFileExists(outputFilename) and not overwrite_enable:
+        print('>>>檔案已存在，跳過辨識。')
+        return title
+
+    if os.path.exists(local_audio_file):
+        print('\n>> ' + title)
+        transcribe(local_audio_file, output_path, outputFilename, outputFormat)
+    else:
+        print(f'>>>找不到語音檔: {local_audio_file}')
+
+    return title
+
+def parseTxtFileAndTranscribe(txtFile):
+    if not os.path.exists(txtFile):
+        print('找不到檔案: ' + txtFile)
+        return
+    with open(txtFile, 'r', encoding='utf-8') as file:
+        lines = [line.strip() for line in file if line.strip()]
+    for line in lines:
+        full_path = line
+        if not 'https://' in line and not os.path.isabs(line) and not os.path.exists(line):
+            path_from_list = os.path.join(os.path.dirname(txtFile), line)
+            if os.path.exists(path_from_list): full_path = path_from_list
+        print(f'\n\n>>>>>> 正在處理清單中的項目: {full_path}')
+        getAudioAndTranscribe(full_path)
+
+# ==============================================================================
+# 5. 主執行區
+# ==============================================================================
+removeAudioFile(audioFile)
+
+# 主邏輯處理
+if not 'https://' in url and url.lower().endswith('.txt'):
+    parseTxtFileAndTranscribe(url)
+    title = os.path.splitext(os.path.basename(url))[0]
+else:
+    try:
+        info = getYoutubePlaylistInfo_ydl(url)
+        if 'entries' in info and info['entries']:
+            print('\n>>檢測到播放列表，開始處理...')
+            title = info.get('title', 'youtube_playlist')
+            for video in info['entries']:
+                 if 'webpage_url' in video:
+                     print(f'\n\n>>>>>> 正在處理列表中的影片: {video.get("title", "未知標題")}')
+                     getAudioAndTranscribe(video['webpage_url'])
+        else:
+            title = getAudioAndTranscribe(url)
+    except Exception:
+        title = getAudioAndTranscribe(url)
+
+if textFileList and start_downloading_immediately:
+    print('\n>> 準備下載結果...')
+    valid_files = [f for f in textFileList if os.path.exists(f)]
+    if not valid_files:
+        print(">> 沒有產生任何可下載的檔案。")
+    else:
+        for textFile in valid_files: convertNewLineFormat(textFile)
+        if len(valid_files) > 1:
+            print('\n>> 壓縮並下載辨識結果...')
+            zip_filename = getFilenameFromTitle(title) + '-' + outputFormat.replace('.', '') + '.zip'
+            zip_cmd = ["zip", "-j", zip_filename] + valid_files
+            subprocess.run(zip_cmd, stdout=subprocess.DEVNULL)
+            google.colab.files.download(zip_filename)
+        else:
+            print('\n>> 下載辨識結果...')
+            google.colab.files.download(valid_files[0])
