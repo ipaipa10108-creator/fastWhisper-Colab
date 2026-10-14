@@ -32,6 +32,10 @@ max_words_per_line = 0 # @param {type:"integer"}
 max_line_width = 0 # @param {type:"integer"}
 max_line_count = 1 # @param {type:"integer"}
 word_timestamps = False #@param { type: 'boolean' }
+merge_same_text = True #@param { type: 'boolean' }
+#@markdown <small>是否自動合併相鄰且文字相同的字幕行（同 SubtitleEdit 功能，自動消除跳針重複並延展時間軸）</small>
+merge_same_time = True #@param { type: 'boolean' }
+#@markdown <small>是否自動合併時間相同的字幕行（同 SubtitleEdit 功能，重複去重或轉為多行）</small>
 
 #@markdown ---
 #@markdown <h3>💡 YouTube 下載提示</h3>
@@ -364,6 +368,51 @@ def split_segment_by_limits(words, max_words, max_width, max_lines=1):
 
     return srt_segments
 
+# 仿 SubtitleEdit 智慧合併去重器 (支援合併時間相同行與合併文字相同行)
+def merge_subtitle_segments(segments, merge_same_text=True, merge_same_time=True, max_gap=2.0):
+    if not segments:
+        return []
+
+    # 1. 合併時間相同的行 (Merge lines with same time codes)
+    if merge_same_time:
+        time_merged = []
+        for seg in segments:
+            if not time_merged:
+                time_merged.append(dict(seg))
+                continue
+            prev = time_merged[-1]
+            # 容許 50 毫秒以內的浮點誤差
+            if abs(seg['start'] - prev['start']) < 0.05 and abs(seg['end'] - prev['end']) < 0.05:
+                if seg['text'].strip() == prev['text'].strip():
+                    continue  # 時間相同且文字相同 -> 去重
+                else:
+                    # 時間相同但文字不同 -> 依 SubtitleEdit 規範合併為多行
+                    prev['text'] = f"{prev['text']}\n{seg['text'].strip()}"
+            else:
+                time_merged.append(dict(seg))
+        segments = time_merged
+
+    # 2. 合併文字相同的相鄰行 (Merge lines with same text)
+    if merge_same_text:
+        text_merged = []
+        for seg in segments:
+            if not text_merged:
+                text_merged.append(dict(seg))
+                continue
+            prev = text_merged[-1]
+            text_curr = seg['text'].strip()
+            text_prev = prev['text'].strip()
+            gap = seg['start'] - prev['end']
+
+            # 若相鄰行文字相同，且時間重疊或間隔小於設定門檻 (預設 2 秒內)
+            if text_curr == text_prev and gap <= max_gap:
+                prev['end'] = max(prev['end'], seg['end'])
+            else:
+                text_merged.append(dict(seg))
+        segments = text_merged
+
+    return segments
+
 def format_ts(ts):
     h = int(ts // 3600)
     m = int((ts % 3600) // 60)
@@ -531,32 +580,43 @@ def saveToFile(result, output_path, filename, fileType='srt'):
     output_filepath = os.path.join(output_path, f"{filename}.{fileType}")
     os.makedirs(output_path, exist_ok=True)
 
+    # 1. 整理基礎字幕片段
+    raw_segments = []
+    for seg in result['segments']:
+        words = seg.get('words')
+        if word_timestamps and words and (max_words_per_line > 0 or max_line_width > 0):
+            sub_segments = split_segment_by_limits(
+                words,
+                max_words=max_words_per_line,
+                max_width=max_line_width,
+                max_lines=max_line_count
+            )
+            for sub_seg in sub_segments:
+                text = clean_chinese_spacing(to_traditional(sub_seg['text']))
+                if text:
+                    raw_segments.append({'start': sub_seg['start'], 'end': sub_seg['end'], 'text': text})
+        else:
+            text = clean_chinese_spacing(to_traditional(seg['text']))
+            if text:
+                raw_segments.append({'start': seg['start'], 'end': seg['end'], 'text': text})
+
+    # 2. 仿 SubtitleEdit 智慧合併去重處理 (文字相同合併 / 時間相同合併)
+    processed_segments = merge_subtitle_segments(
+        raw_segments,
+        merge_same_text=merge_same_text,
+        merge_same_time=merge_same_time
+    )
+
     if fileType == 'txt':
         with open(output_filepath, "w", encoding="utf-8") as f:
-            full_text = "，".join([seg['text'].strip() for seg in result['segments']])
+            full_text = "，".join([seg['text'].strip() for seg in processed_segments])
             full_text = clean_chinese_spacing(to_traditional(full_text))
             f.write(full_text)
 
     elif fileType == 'srt':
         with open(output_filepath, "w", encoding="utf-8") as f:
-            srt_index = 1
-            for seg in result['segments']:
-                words = seg.get('words')
-                if word_timestamps and words and (max_words_per_line > 0 or max_line_width > 0):
-                    sub_segments = split_segment_by_limits(
-                        words,
-                        max_words=max_words_per_line,
-                        max_width=max_line_width,
-                        max_lines=max_line_count
-                    )
-                    for sub_seg in sub_segments:
-                        text = clean_chinese_spacing(to_traditional(sub_seg['text']))
-                        f.write(segment_to_srt(srt_index, sub_seg['start'], sub_seg['end'], text))
-                        srt_index += 1
-                else:
-                    text = clean_chinese_spacing(to_traditional(seg['text']))
-                    f.write(segment_to_srt(srt_index, seg['start'], seg['end'], text))
-                    srt_index += 1
+            for srt_index, seg in enumerate(processed_segments, start=1):
+                f.write(segment_to_srt(srt_index, seg['start'], seg['end'], seg['text']))
 
     print(f">> 已成功儲存結果至: {output_filepath}")
 
