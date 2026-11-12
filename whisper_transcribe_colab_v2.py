@@ -61,6 +61,7 @@ import ctypes
 import glob
 import time
 import json
+import random
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -351,6 +352,21 @@ def _find_cookie_file():
             return c
     return None
 
+def _validate_youtube_cookie(cookie_path):
+    """檢查 cookies.txt 是否包含已登入的 YouTube 認證欄位，若為未登入無痕 Cookie 則發出警告"""
+    if not cookie_path or not os.path.isfile(cookie_path):
+        return False
+    try:
+        with open(cookie_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+        auth_keys = ["SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID", "LOGIN_INFO", "SID"]
+        has_auth = any(f"\t{k}\t" in content for k in auth_keys)
+        return has_auth
+    except Exception:
+        return True
+
+COOKIE_CHECKED = False
+
 def getYoutubePlaylistInfo_ydl(url):
     ydl_opts = {'no_warnings': True, 'quiet': True, 'extract_flat': True}
     cookie_file = _find_cookie_file()
@@ -360,36 +376,67 @@ def getYoutubePlaylistInfo_ydl(url):
         return ydl.extract_info(url, download=False)
 
 def getAudioFromYoutube_ydl(url, output_path, outputFilename):
-    global LAST_YTDLP_TIME
+    global LAST_YTDLP_TIME, COOKIE_CHECKED
     cookie_file = _find_cookie_file()
 
     # YouTube 下載序列鎖與速率控制：避免多執行緒同時連擊 YouTube 觸發 HTTP 429 或覆寫壞 cookies.txt
     with YTDLP_LOCK:
+        if cookie_file and not COOKIE_CHECKED:
+            COOKIE_CHECKED = True
+            if not _validate_youtube_cookie(cookie_file):
+                print(
+                    "⚠️ [重要警告] 偵測到您的 cookies.txt 中缺少 YouTube 登入憑證 (SAPISID / LOGIN_INFO)！\n"
+                    "   👉 您可能在開了「無痕視窗」後『沒有先登入 Google/YouTube 帳號』就直接匯出了 Cookie。\n"
+                    "   👉 未登入的訪客 Cookie 無法通過 YouTube 的機器人驗證 (HTTP 429 / Sign in to confirm you're not a bot)。\n"
+                    "   👉 正確步驟：開無痕視窗 -> 登入 YouTube 帳號 -> 匯出 cookies.txt -> 立刻直接關閉無痕視窗（千萬別按登出）。"
+                )
+
         elapsed = time.time() - LAST_YTDLP_TIME
-        if elapsed < 2.0:
-            time.sleep(2.0 - elapsed)
+        min_interval = random.uniform(3.5, 6.0)
+        if LAST_YTDLP_TIME > 0 and elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            download_command = [
+            base_command = [
                 "yt-dlp",
-                "-f", "ba",
+                "-f", "ba/b",
                 "--no-playlist",
                 "--write-info-json",
+                "--force-ipv4",
                 "-P", temp_dir,
             ] + _get_js_runtime_args()
 
+            temp_cookie = None
             if cookie_file:
                 temp_cookie = os.path.join(temp_dir, "cookies_copy.txt")
                 shutil.copy2(cookie_file, temp_cookie)
                 print(f">> 偵測到 {cookie_file}，將使用獨立 Cookie 副本進行下載...")
-                download_command.extend(["--cookies", temp_cookie])
 
-            download_command.append(url)
-            result = subprocess.run(download_command, capture_output=True, text=True)
-            LAST_YTDLP_TIME = time.time()
+            # 嘗試兩種策略：
+            # 策略 1: 帶有 Cookie 時使用預設 web/tv client
+            # 策略 2: 若失敗或無 Cookie，切換為比較不易觸發 429 網頁阻擋的移动端/嵌合端 client
+            attempts = []
+            if temp_cookie:
+                attempts.append(base_command + ["--cookies", temp_cookie, url])
+                attempts.append(base_command + ["--cookies", temp_cookie, "--extractor-args", "youtube:player_client=tv,mweb,web", url])
+            attempts.append(base_command + ["--extractor-args", "youtube:player_client=ios,android,mweb", url])
 
-            if result.returncode != 0:
-                raise subprocess.CalledProcessError(result.returncode, result.args, output=result.stdout, stderr=result.stderr)
+            last_result = None
+            for attempt_idx, cmd in enumerate(attempts):
+                if attempt_idx > 0:
+                    time.sleep(2.0)
+                last_result = subprocess.run(cmd, capture_output=True, text=True)
+                LAST_YTDLP_TIME = time.time()
+                if last_result.returncode == 0:
+                    break
+
+            if last_result.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    last_result.returncode,
+                    last_result.args,
+                    output=last_result.stdout,
+                    stderr=last_result.stderr
+                )
 
             all_files = os.listdir(temp_dir)
             video_title = None
@@ -861,10 +908,13 @@ def processBatchItems(items):
             for idx, future in enumerate(as_completed(future_to_item), start=1):
                 item = future_to_item[future]
                 try:
-                    future.result()
-                    print(f">> ✅ 進度 [{idx}/{len(items)}] 完成: {item}")
+                    res = future.result()
+                    if res is not None:
+                        print(f">> ✅ 進度 [{idx}/{len(items)}] 完成: {item} ({res})")
+                    else:
+                        print(f">> ❌ 進度 [{idx}/{len(items)}] 失敗 (未能下載或略過): {item}")
                 except Exception as e:
-                    print(f">> ❌ 進度 [{idx}/{len(items)}] 處理失敗 ({item}): {e}")
+                    print(f">> ❌ 進度 [{idx}/{len(items)}] 處理例外 ({item}): {e}")
     else:
         for idx, item in enumerate(items, start=1):
             print(f'\n\n>>>>>> 正在處理清單中的項目 [{idx}/{len(items)}]: {item}')
