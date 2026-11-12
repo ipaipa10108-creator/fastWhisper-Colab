@@ -4,7 +4,7 @@
 #@markdown <h3>1. 📁 輸入與輸出設定</h3>
 url = "/content/LY_Rec_gdrive_colab_paths.txt" #@param {type:"string"}
 #@markdown <small>支援：本機/Google Drive 音檔路徑、批次清單文字檔 (.txt)、YouTube 影片/播放清單網址、Vocaroo 錄音網址</small>
-output_path = "/content/drive/MyDrive/LY Class Rec/" # @param {type:"string"}
+output_path = "/content/drive/MyDrive/課程字幕/" # @param ['/content/drive/MyDrive/LY Class Rec/', '/content/drive/MyDrive/課程字幕/', '/content/']
 #@markdown <small>字幕輸出目錄（若目錄不存在將自動新增）</small>
 outputFormat = 'srt' #@param ['srt', 'txt', '.srt.txt']
 overwrite_enable = True #@param { type: 'boolean' }
@@ -59,6 +59,8 @@ import shutil
 import importlib
 import ctypes
 import glob
+import time
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -327,32 +329,91 @@ if outputFormat == '.srt.txt':
     outputFormat = 'srt'
     renameSrtToTxt = True
 
+YTDLP_LOCK = threading.Lock()
+LAST_YTDLP_TIME = 0.0
+
+def _get_js_runtime_args():
+    if shutil.which("node"):
+        return ["--js-runtimes", "node"]
+    if shutil.which("deno"):
+        return ["--js-runtimes", "deno"]
+    return []
+
+def _find_cookie_file():
+    candidates = [
+        "cookies.txt",
+        "/content/cookies.txt",
+        os.path.join(os.path.dirname(url), "cookies.txt") if url else "",
+        os.path.join(output_path, "cookies.txt") if output_path else "",
+    ]
+    for c in candidates:
+        if c and os.path.isfile(c) and os.path.getsize(c) > 0:
+            return c
+    return None
+
 def getYoutubePlaylistInfo_ydl(url):
     ydl_opts = {'no_warnings': True, 'quiet': True, 'extract_flat': True}
-    if os.path.exists("cookies.txt"):
-        ydl_opts['cookiefile'] = 'cookies.txt'
+    cookie_file = _find_cookie_file()
+    if cookie_file:
+        ydl_opts['cookiefile'] = cookie_file
     with YoutubeDL(ydl_opts) as ydl:
         return ydl.extract_info(url, download=False)
 
 def getAudioFromYoutube_ydl(url, output_path, outputFilename):
-    with tempfile.TemporaryDirectory() as temp_dir:
-        download_command = ["yt-dlp", "-f", "ba", "-P", temp_dir, url]
-        if os.path.exists("cookies.txt"):
-             print(">> 偵測到 cookies.txt，將使用 Cookie 進行下載...")
-             download_command.extend(["--cookies", "cookies.txt"])
+    global LAST_YTDLP_TIME
+    cookie_file = _find_cookie_file()
 
-        result = subprocess.run(download_command, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise subprocess.CalledProcessError(result.returncode, result.args, output=result.stdout, stderr=result.stderr)
+    # YouTube 下載序列鎖與速率控制：避免多執行緒同時連擊 YouTube 觸發 HTTP 429 或覆寫壞 cookies.txt
+    with YTDLP_LOCK:
+        elapsed = time.time() - LAST_YTDLP_TIME
+        if elapsed < 2.0:
+            time.sleep(2.0 - elapsed)
 
-        downloaded_files = os.listdir(temp_dir)
-        if not downloaded_files:
-            raise FileNotFoundError("yt-dlp 下載失敗，目錄中沒有檔案。")
-        source_audio_path = os.path.join(temp_dir, downloaded_files[0])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            download_command = [
+                "yt-dlp",
+                "-f", "ba",
+                "--no-playlist",
+                "--write-info-json",
+                "-P", temp_dir,
+            ] + _get_js_runtime_args()
 
-        target_path = os.path.join(output_path, outputFilename)
-        convert_command = ["ffmpeg", "-i", source_audio_path, "-q:a", "0", "-map", "a", "-y", target_path]
-        subprocess.run(convert_command, check=True, capture_output=True, text=True)
+            if cookie_file:
+                temp_cookie = os.path.join(temp_dir, "cookies_copy.txt")
+                shutil.copy2(cookie_file, temp_cookie)
+                print(f">> 偵測到 {cookie_file}，將使用獨立 Cookie 副本進行下載...")
+                download_command.extend(["--cookies", temp_cookie])
+
+            download_command.append(url)
+            result = subprocess.run(download_command, capture_output=True, text=True)
+            LAST_YTDLP_TIME = time.time()
+
+            if result.returncode != 0:
+                raise subprocess.CalledProcessError(result.returncode, result.args, output=result.stdout, stderr=result.stderr)
+
+            all_files = os.listdir(temp_dir)
+            video_title = None
+            for f in all_files:
+                if f.endswith(".info.json"):
+                    try:
+                        with open(os.path.join(temp_dir, f), "r", encoding="utf-8") as jf:
+                            info_data = json.load(jf)
+                            video_title = info_data.get("title")
+                    except Exception:
+                        pass
+
+            audio_files = [
+                f for f in all_files
+                if not f.endswith(".info.json") and f != "cookies_copy.txt" and not f.endswith(".part")
+            ]
+            if not audio_files:
+                raise FileNotFoundError("yt-dlp 下載失敗，目錄中沒有音訊檔案。")
+            source_audio_path = os.path.join(temp_dir, audio_files[0])
+
+            target_path = os.path.join(output_path, outputFilename)
+            convert_command = ["ffmpeg", "-i", source_audio_path, "-q:a", "0", "-map", "a", "-y", target_path]
+            subprocess.run(convert_command, check=True, capture_output=True, text=True)
+            return video_title
 
 def getVocarooMP3URL(url):
     match = re.search(r'(https://voca\.ro|https://vocaroo\.com)/(\w{12})', url)
@@ -740,27 +801,15 @@ def getAudioAndTranscribe(urlOrFile):
         local_audio_file = f'source_{url_hash}_{threading.get_ident()}.mp3'
         is_temp_web_audio = True
 
-        if 'youtube.' in urlOrFile or 'youtu.' in urlOrFile:
-            try:
-                info = getYoutubePlaylistInfo_ydl(urlOrFile)
-                title = info.get('title', title)
-            except Exception:
-                pass
-
-        outputFilename = getFilenameFromTitle(title)
-        if isOutputTextFileExists(outputFilename) and not overwrite_enable:
-            print(f'>>> [{outputFilename}] 檔案已存在，跳過。')
-            with textFileListLock:
-                textFileList.append(getOutputTextFilename(outputFilename))
-            return title
-
-        print(f'>> [{outputFilename}] 下載影音檔案中...')
+        print(f'>> [{title}] 下載影音檔案中...')
         try:
             removeAudioFile(local_audio_file)
             if 'voca.ro' in urlOrFile or 'vocaroo.com' in urlOrFile:
-                 urllib.request.urlretrieve(getVocarooMP3URL(urlOrFile), local_audio_file)
+                urllib.request.urlretrieve(getVocarooMP3URL(urlOrFile), local_audio_file)
             else:
-                 getAudioFromYoutube_ydl(urlOrFile, tempFolder, local_audio_file)
+                dl_title = getAudioFromYoutube_ydl(urlOrFile, tempFolder, local_audio_file)
+                if dl_title:
+                    title = dl_title
         except subprocess.CalledProcessError as e:
             print(f'>>> 無法由網址下載影音: \n--- yt-dlp 錯誤訊息 ---\n{e.stderr}')
             removeAudioFile(local_audio_file)
@@ -769,6 +818,8 @@ def getAudioAndTranscribe(urlOrFile):
             print(f'>>> 無法由網址下載影音: {e}')
             removeAudioFile(local_audio_file)
             return None
+
+        outputFilename = getFilenameFromTitle(title)
     else:
         print('>> 處理本地檔案: ' + urlOrFile)
         title = os.path.splitext(os.path.basename(urlOrFile))[0]
