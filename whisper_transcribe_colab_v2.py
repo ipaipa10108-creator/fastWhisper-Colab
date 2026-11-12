@@ -12,7 +12,7 @@ start_downloading_immediately = False #@param { type: 'boolean' }
 #@markdown <small>辨識完成後是否透過瀏覽器下載（若已輸出至 Google Drive 建議設為 False，避免觸發瀏覽器彈跳視窗封鎖）</small>
 
 #@markdown ---
-#@markdown <h3>2. 🎯 語音辨識模型與語言設定</h3>
+#@markdown <h3>2. 🎯 語音辨識模型、硬體與語言設定</h3>
 #@markdown <ul>
 #@markdown <li><b>shooding/faster-whisper-large-v3-zh-TW</b>：【🌟 推薦首選】採用數位發展部台灣在地語料庫 LoRA 微調，對台灣腔調、繁體在地詞彙精準度最高。</li>
 #@markdown <li><b>asadfgglie/faster-whisper-large-v3-zh-TW</b>：【⚡ 極速推薦】基於最新 Turbo 架構微調 Common Voice 19 繁中，速度極快、顯存低。</li>
@@ -20,17 +20,20 @@ start_downloading_immediately = False #@param { type: 'boolean' }
 #@markdown <li><b>large-v3-turbo / large-v3</b>：OpenAI 官方原版模型。</li>
 #@markdown </ul>
 modelType = "shooding/faster-whisper-large-v3-zh-TW" # @param ["shooding/faster-whisper-large-v3-zh-TW", "asadfgglie/faster-whisper-large-v3-zh-TW", "large-v3-turbo", "sensevoice", "large-v3", "large-v2", "medium", "small"] {allow-input: true}
+gpu_type = "A100" # @param ["A100", "T4 / L4 / V100 (一般單工)", "自動偵測"]
+a100_workers = "預設 (A100=4, 一般=1)" # @param ["預設 (A100=4, 一般=1)", "1", "2", "3", "4", "6", "8"] {allow-input: true}
+#@markdown <small>當選擇 A100（或自動偵測到 A100）時，支援同時多工並行處理清單中的多個音檔（A100 預設一次處理 4 個）。</small>
 lang = "Chinese" # @param ["Chinese", "自動判斷", "English", "Japanese", "Korean"] {allow-input: true}
 initial_prompt = "以下是繁體中文的句子" # @param ["以下是繁體中文的句子", "以下是台灣華語普通話的繁體中文句子。", ""] {allow-input: true}
 #@markdown <small>提示詞（Whisper 專用，可用於引導專有名詞；SenseVoice 模型將自動略過）</small>
 
 #@markdown ---
 #@markdown <h3>3. ✂️ 字幕排版與折行控制</h3>
-#@markdown <small>系統會自動清理中文多餘空白。若設定每行字數或寬度，系統將<b>自動啟用單字級時間戳 (word_timestamps)</b> 進行智慧排版。</small>
+#@markdown <small>系統會自動清理中文多餘空白。當選擇 <code>asadfgglie/faster-whisper-large-v3-zh-TW</code> 時，會自動將 <code>max_line_width</code> 設為 18、<code>max_line_count</code> 設為 1；選擇其他模型時則兩者皆自動設為 0。</small>
 verbose = True #@param { type: 'boolean' }
 max_words_per_line = 0 # @param {type:"integer"}
 max_line_width = 0 # @param {type:"integer"}
-max_line_count = 1 # @param {type:"integer"}
+max_line_count = 0 # @param {type:"integer"}
 word_timestamps = False #@param { type: 'boolean' }
 merge_same_text = True #@param { type: 'boolean' }
 #@markdown <small>是否自動合併相鄰且文字相同的字幕行（同 SubtitleEdit 功能，自動消除跳針重複並延展時間軸）</small>
@@ -56,6 +59,8 @@ import shutil
 import importlib
 import ctypes
 import glob
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 print(">> 正在檢查並設定最佳執行環境 (v2.0 繁中最佳化版)...")
 
@@ -257,6 +262,16 @@ if not url.startswith('http://') and not url.startswith('https://'):
     elif not os.path.exists(url):
         raise FileNotFoundError(f"❌ [防呆錯誤] 找不到指定的音訊檔案: {url}\n若位於 Google Drive，請確認左側雲端硬碟是否已成功掛載。")
 
+# 依模型自動設定折行參數 (max_line_width 與 max_line_count)
+if modelType == "asadfgglie/faster-whisper-large-v3-zh-TW":
+    max_line_width = 18
+    max_line_count = 1
+    print(f">> 💡 [模型規則] 偵測到選擇 '{modelType}'，自動設定 max_line_width=18, max_line_count=1")
+else:
+    max_line_width = 0
+    max_line_count = 0
+    print(f">> 💡 [模型規則] 偵測到選擇非 'asadfgglie/faster-whisper-large-v3-zh-TW' ({modelType})，自動設定 max_line_width=0, max_line_count=0")
+
 # 智慧防呆：若有設定折行限制，自動啟用 word_timestamps
 if (max_words_per_line > 0 or max_line_width > 0) and not word_timestamps:
     if modelType.lower() != 'sensevoice':
@@ -277,8 +292,35 @@ audioFile = 'source.mp3'
 tempFolder = '.'
 title = ''
 textFileList = []
+textFileListLock = threading.Lock()
 import torch
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# 判斷是否為 A100 與設定多工數量
+is_a100 = False
+if gpu_type == "A100":
+    is_a100 = True
+elif gpu_type == "自動偵測" and DEVICE == "cuda":
+    try:
+        gpu_name = torch.cuda.get_device_name(0).upper()
+        if "A100" in gpu_name:
+            is_a100 = True
+            print(f">> 🚀 [硬體偵測] 自動偵測到 NVIDIA A100 GPU ({gpu_name})！")
+    except Exception:
+        pass
+
+if is_a100:
+    if str(a100_workers).startswith("預設"):
+        num_workers = 4
+    else:
+        try:
+            num_workers = max(1, int(str(a100_workers).strip()))
+        except ValueError:
+            num_workers = 4
+    print(f">> 🚀 [A100 多工模式] 已啟用！將以 {num_workers} 個並行工作執行緒同時處理清單檔案。")
+else:
+    num_workers = 1
+    print(">> ℹ️ [一般單工模式] 每次依序處理 1 個音檔。")
 
 renameSrtToTxt = False
 if outputFormat == '.srt.txt':
@@ -433,62 +475,64 @@ def segment_to_srt(index, start, end, text):
     return f"{index}\n{format_ts(start)} --> {format_ts(end)}\n{text}\n\n"
 
 # ==============================================================================
-# 5. 語音辨識核心邏輯 (支援繁中在地微調模型、SenseVoice 與語言防呆)
+# 5. 語音辨識核心邏輯 (支援繁中在地微調模型、SenseVoice、A100 多工與語言防呆)
 # ==============================================================================
-def transcribe(audioFilename, output_path, outputFilename, outputFormat):
-    print('\n>>>>> 載入模型...')
+GLOBAL_ASR_MODEL = None
+GLOBAL_CPU_FALLBACK_MODEL = None
+MODEL_INIT_LOCK = threading.Lock()
+SENSEVOICE_LOCK = threading.Lock()
 
-    if modelType.lower() == 'sensevoice':
-        print('\n>>> 正在使用阿里 SenseVoice-Small 模型進行極速辨識...')
-        from funasr import AutoModel
+def get_asr_model():
+    global GLOBAL_ASR_MODEL
+    if GLOBAL_ASR_MODEL is not None:
+        return GLOBAL_ASR_MODEL
 
-        # 語言設定防呆轉換
-        sv_lang_map = {
-            "Chinese": "zh",
-            "English": "en",
-            "Japanese": "ja",
-            "Korean": "ko",
-            "自動判斷": "auto"
-        }
-        sv_lang = sv_lang_map.get(lang, "auto")
+    with MODEL_INIT_LOCK:
+        if GLOBAL_ASR_MODEL is not None:
+            return GLOBAL_ASR_MODEL
 
-        model = AutoModel(
-            model="iic/SenseVoiceSmall",
-            vad_model="fsmn-vad",
-            vad_kwargs={"max_single_segment_time": 30000},
-            device=DEVICE,
-            disable_update=True
-        )
-        result_raw = model.generate(input=audioFilename, language=sv_lang, use_itn=True)
+        if modelType.lower() == 'sensevoice':
+            print('\n>>> 正在載入阿里 SenseVoice-Small 模型...')
+            from funasr import AutoModel
+            GLOBAL_ASR_MODEL = AutoModel(
+                model="iic/SenseVoiceSmall",
+                vad_model="fsmn-vad",
+                vad_kwargs={"max_single_segment_time": 30000},
+                device=DEVICE,
+                disable_update=True
+            )
+        else:
+            from faster_whisper import WhisperModel
+            print(f'\n>>> 正在載入模型 ({modelType}) [並行工作數: {num_workers}]...')
+            compute_type = "float16" if DEVICE == "cuda" else "default"
+            model_mapping = {
+                "shooding/faster-whisper-large-v3-zh-TW": "shooding/faster-whisper-large-v3-zh-TW",
+                "asadfgglie/faster-whisper-large-v3-zh-TW": "asadfgglie/faster-whisper-large-v3-zh-TW",
+                "large-v3-turbo": "turbo",
+                "turbo": "turbo",
+                "large-v3": "large-v3",
+                "large-v2": "large-v2",
+                "large": "large-v3",
+                "medium": "medium",
+                "small": "small"
+            }
+            model_size = model_mapping.get(modelType, modelType)
+            GLOBAL_ASR_MODEL = WhisperModel(
+                model_size,
+                device=DEVICE,
+                compute_type=compute_type,
+                num_workers=num_workers
+            )
+    return GLOBAL_ASR_MODEL
 
-        result = {'segments': []}
-        if result_raw and result_raw[0].get("sentence_info"):
-            for res in result_raw[0]["sentence_info"]:
-                raw_text = res.get('text', '')
-                # 清除 SenseVoice 可能產生的情緒與聲音事件標籤 (如 <|HAPPY|>, <|laughter|>)
-                cleaned_text = re.sub(r'<\|.*?\|>', '', raw_text).strip()
-                seg_text = to_traditional(cleaned_text)
-
-                if verbose:
-                    start_s = res.get('start', 0) / 1000.0
-                    end_s = res.get('end', 0) / 1000.0
-                    print(f"[{format_ts(start_s)} --> {format_ts(end_s)}] {clean_chinese_spacing(seg_text)}")
-
-                result['segments'].append({
-                    'start': res.get('start', 0) / 1000.0,
-                    'end': res.get('end', 0) / 1000.0,
-                    'text': seg_text
-                })
-        print('>>> SenseVoice 辨識完成！')
-
-    else:
-        # Faster-Whisper 架構 (支援台灣華語微調模型與官方版)
+def get_cpu_fallback_model():
+    global GLOBAL_CPU_FALLBACK_MODEL
+    if GLOBAL_CPU_FALLBACK_MODEL is not None:
+        return GLOBAL_CPU_FALLBACK_MODEL
+    with MODEL_INIT_LOCK:
+        if GLOBAL_CPU_FALLBACK_MODEL is not None:
+            return GLOBAL_CPU_FALLBACK_MODEL
         from faster_whisper import WhisperModel
-        print(f'\n>>> 正在載入模型 ({modelType})...')
-
-        compute_type = "float16" if DEVICE == "cuda" else "default"
-
-        # 模型名稱對應
         model_mapping = {
             "shooding/faster-whisper-large-v3-zh-TW": "shooding/faster-whisper-large-v3-zh-TW",
             "asadfgglie/faster-whisper-large-v3-zh-TW": "asadfgglie/faster-whisper-large-v3-zh-TW",
@@ -501,9 +545,50 @@ def transcribe(audioFilename, output_path, outputFilename, outputFormat):
             "small": "small"
         }
         model_size = model_mapping.get(modelType, modelType)
+        GLOBAL_CPU_FALLBACK_MODEL = WhisperModel(model_size, device="cpu", compute_type="int8")
+    return GLOBAL_CPU_FALLBACK_MODEL
 
-        model = WhisperModel(model_size, device=DEVICE, compute_type=compute_type)
-        print('\n>>> 開始解譯......')
+def transcribe(audioFilename, output_path, outputFilename, outputFormat):
+    model = get_asr_model()
+
+    if modelType.lower() == 'sensevoice':
+        print(f'\n>>> [{outputFilename}] 開始使用 SenseVoice-Small 進行辨識...')
+
+        # 語言設定防呆轉換
+        sv_lang_map = {
+            "Chinese": "zh",
+            "English": "en",
+            "Japanese": "ja",
+            "Korean": "ko",
+            "自動判斷": "auto"
+        }
+        sv_lang = sv_lang_map.get(lang, "auto")
+
+        with SENSEVOICE_LOCK:
+            result_raw = model.generate(input=audioFilename, language=sv_lang, use_itn=True)
+
+        result = {'segments': []}
+        if result_raw and result_raw[0].get("sentence_info"):
+            for res in result_raw[0]["sentence_info"]:
+                raw_text = res.get('text', '')
+                # 清除 SenseVoice 可能產生的情緒與聲音事件標籤 (如 <|HAPPY|>, <|laughter|>)
+                cleaned_text = re.sub(r'<\|.*?\|>', '', raw_text).strip()
+                seg_text = to_traditional(cleaned_text)
+
+                if verbose:
+                    start_s = res.get('start', 0) / 1000.0
+                    end_s = res.get('end', 0) / 1000.0
+                    print(f"[{outputFilename}] [{format_ts(start_s)} --> {format_ts(end_s)}] {clean_chinese_spacing(seg_text)}")
+
+                result['segments'].append({
+                    'start': res.get('start', 0) / 1000.0,
+                    'end': res.get('end', 0) / 1000.0,
+                    'text': seg_text
+                })
+        print(f'>>> [{outputFilename}] SenseVoice 辨識完成！')
+
+    else:
+        print(f'\n>>> [{outputFilename}] 開始解譯......')
 
         args = {
             'beam_size': 5,
@@ -535,8 +620,8 @@ def transcribe(audioFilename, output_path, outputFilename, outputFormat):
             segments, info = model.transcribe(audioFilename, **args)
         except RuntimeError as e:
             if "libcublas" in str(e) or "CUDA" in str(e):
-                print(f">> 偵測到 CUDA 執行時期異常 ({e})，自動降級為 CPU 模式重新解譯...")
-                cpu_model = WhisperModel(model_size, device="cpu", compute_type="int8")
+                print(f">> [{outputFilename}] 偵測到 CUDA 執行時期異常 ({e})，自動降級為 CPU 模式重新解譯...")
+                cpu_model = get_cpu_fallback_model()
                 segments, info = cpu_model.transcribe(audioFilename, **args)
             else:
                 raise e
@@ -545,7 +630,7 @@ def transcribe(audioFilename, output_path, outputFilename, outputFormat):
         for segment in segments:
             seg_text = to_traditional(segment.text)
             if verbose:
-                print(f"[{format_ts(segment.start)} --> {format_ts(segment.end)}] {clean_chinese_spacing(seg_text)}")
+                print(f"[{outputFilename}] [{format_ts(segment.start)} --> {format_ts(segment.end)}] {clean_chinese_spacing(seg_text)}")
 
             words_list = []
             if word_timestamps and segment.words:
@@ -563,7 +648,7 @@ def transcribe(audioFilename, output_path, outputFilename, outputFormat):
                 'words': words_list if word_timestamps else None
             })
 
-        print('>>> Whisper 辨識完成！')
+        print(f'>>> [{outputFilename}] Whisper 辨識完成！')
 
     saveToFile(result, output_path, outputFilename, outputFormat)
     if renameSrtToTxt:
@@ -646,36 +731,44 @@ def convertNewLineFormat(filename):
 
 def getAudioAndTranscribe(urlOrFile):
     title, outputFilename, local_audio_file = None, None, None
+    is_temp_web_audio = False
 
-    if 'https://' in urlOrFile:
+    if 'https://' in urlOrFile or 'http://' in urlOrFile:
         print('>> 處理網址: ' + urlOrFile)
-        title = 'web_source_' + str(hash(urlOrFile))[-6:]
-        local_audio_file = audioFile
+        url_hash = str(abs(hash(urlOrFile)))[-8:]
+        title = f'web_source_{url_hash}'
+        local_audio_file = f'source_{url_hash}_{threading.get_ident()}.mp3'
+        is_temp_web_audio = True
+
+        if 'youtube.' in urlOrFile or 'youtu.' in urlOrFile:
+            try:
+                info = getYoutubePlaylistInfo_ydl(urlOrFile)
+                title = info.get('title', title)
+            except Exception:
+                pass
 
         outputFilename = getFilenameFromTitle(title)
         if isOutputTextFileExists(outputFilename) and not overwrite_enable:
-            print('>>>檔案已存在，跳過。')
-            textFileList.append(getOutputTextFilename(outputFilename))
+            print(f'>>> [{outputFilename}] 檔案已存在，跳過。')
+            with textFileListLock:
+                textFileList.append(getOutputTextFilename(outputFilename))
             return title
 
-        print('>> 下載影音檔案中...')
+        print(f'>> [{outputFilename}] 下載影音檔案中...')
         try:
             removeAudioFile(local_audio_file)
             if 'voca.ro' in urlOrFile or 'vocaroo.com' in urlOrFile:
                  urllib.request.urlretrieve(getVocarooMP3URL(urlOrFile), local_audio_file)
             else:
                  getAudioFromYoutube_ydl(urlOrFile, tempFolder, local_audio_file)
-
-            if 'youtube.' in urlOrFile or 'youtu.' in urlOrFile:
-                 info = getYoutubePlaylistInfo_ydl(urlOrFile)
-                 title = info.get('title', title)
         except subprocess.CalledProcessError as e:
             print(f'>>> 無法由網址下載影音: \n--- yt-dlp 錯誤訊息 ---\n{e.stderr}')
+            removeAudioFile(local_audio_file)
             return None
         except Exception as e:
             print(f'>>> 無法由網址下載影音: {e}')
+            removeAudioFile(local_audio_file)
             return None
-        outputFilename = getFilenameFromTitle(title)
     else:
         print('>> 處理本地檔案: ' + urlOrFile)
         title = os.path.splitext(os.path.basename(urlOrFile))[0]
@@ -683,19 +776,48 @@ def getAudioAndTranscribe(urlOrFile):
         # 本地檔案檔名與音檔名稱保持 100% 完全一致 (不經過任何置換)
         outputFilename = title
 
-    textFileList.append(getOutputTextFilename(outputFilename))
+    with textFileListLock:
+        textFileList.append(getOutputTextFilename(outputFilename))
 
     if isOutputTextFileExists(outputFilename) and not overwrite_enable:
-        print('>>>檔案已存在，跳過辨識。')
+        print(f'>>> [{outputFilename}] 檔案已存在，跳過辨識。')
+        if is_temp_web_audio:
+            removeAudioFile(local_audio_file)
         return title
 
-    if os.path.exists(local_audio_file):
-        print('\n>> ' + title)
-        transcribe(local_audio_file, output_path, outputFilename, outputFormat)
-    else:
-        print(f'>>>找不到語音檔: {local_audio_file}')
+    try:
+        if os.path.exists(local_audio_file):
+            print('\n>> ' + title)
+            transcribe(local_audio_file, output_path, outputFilename, outputFormat)
+        else:
+            print(f'>>>找不到語音檔: {local_audio_file}')
+    finally:
+        if is_temp_web_audio:
+            removeAudioFile(local_audio_file)
 
     return title
+
+def processBatchItems(items):
+    if not items:
+        return
+    # 預先初始化模型，避免多執行緒同時建立模型
+    get_asr_model()
+
+    if num_workers > 1 and len(items) > 1:
+        print(f"\n>> 🚀 啟動 A100 多工批次處理：共 {len(items)} 個項目，同時處理數 = {num_workers}")
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            future_to_item = {executor.submit(getAudioAndTranscribe, item): item for item in items}
+            for idx, future in enumerate(as_completed(future_to_item), start=1):
+                item = future_to_item[future]
+                try:
+                    future.result()
+                    print(f">> ✅ 進度 [{idx}/{len(items)}] 完成: {item}")
+                except Exception as e:
+                    print(f">> ❌ 進度 [{idx}/{len(items)}] 處理失敗 ({item}): {e}")
+    else:
+        for idx, item in enumerate(items, start=1):
+            print(f'\n\n>>>>>> 正在處理清單中的項目 [{idx}/{len(items)}]: {item}')
+            getAudioAndTranscribe(item)
 
 def parseTxtFileAndTranscribe(txtFile):
     if not os.path.exists(txtFile):
@@ -703,13 +825,17 @@ def parseTxtFileAndTranscribe(txtFile):
         return
     with open(txtFile, 'r', encoding='utf-8') as file:
         lines = [line.strip().strip('"').strip("'") for line in file if line.strip()]
+
+    resolved_items = []
     for line in lines:
         full_path = line
-        if not 'https://' in line and not os.path.isabs(line) and not os.path.exists(line):
+        if not ('https://' in line or 'http://' in line) and not os.path.isabs(line) and not os.path.exists(line):
             path_from_list = os.path.join(os.path.dirname(txtFile), line)
-            if os.path.exists(path_from_list): full_path = path_from_list
-        print(f'\n\n>>>>>> 正在處理清單中的項目: {full_path}')
-        getAudioAndTranscribe(full_path)
+            if os.path.exists(path_from_list):
+                full_path = path_from_list
+        resolved_items.append(full_path)
+
+    processBatchItems(resolved_items)
 
 # ==============================================================================
 # 6. 主執行區
@@ -717,7 +843,7 @@ def parseTxtFileAndTranscribe(txtFile):
 removeAudioFile(audioFile)
 
 # 主邏輯處理
-if not 'https://' in url and url.lower().endswith('.txt'):
+if not ('https://' in url or 'http://' in url) and url.lower().endswith('.txt'):
     parseTxtFileAndTranscribe(url)
     title = os.path.splitext(os.path.basename(url))[0]
 else:
@@ -726,10 +852,8 @@ else:
         if 'entries' in info and info['entries']:
             print('\n>>檢測到播放列表，開始處理...')
             title = info.get('title', 'youtube_playlist')
-            for video in info['entries']:
-                 if 'webpage_url' in video:
-                     print(f'\n\n>>>>>> 正在處理列表中的影片: {video.get("title", "未知標題")}')
-                     getAudioAndTranscribe(video['webpage_url'])
+            playlist_urls = [video['webpage_url'] for video in info['entries'] if 'webpage_url' in video]
+            processBatchItems(playlist_urls)
         else:
             title = getAudioAndTranscribe(url)
     except Exception:

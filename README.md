@@ -84,13 +84,15 @@ Colab 會自動將頂部參數渲染為互動式表單，主要分區如下：
 | | `outputFormat` | 輸出格式 (`srt` / `txt` / `.srt.txt`) | `srt` |
 | | `overwrite_enable` | 是否覆蓋已存在的字幕檔 | `True` |
 | | `start_downloading_immediately` | 完成後是否透過瀏覽器彈出下載 | `False` |
-| **2. 模型與語言** | `modelType` | 選擇 ASR 模型 | `shooding/faster-whisper-large-v3-zh-TW` |
+| **2. 模型、硬體與語言** | `modelType` | 選擇 ASR 模型 | `shooding/faster-whisper-large-v3-zh-TW` |
+| | `gpu_type` | 選擇硬體加速器（選 `A100` 時支援多工並行處理清單） | `A100` / `T4 / L4 / V100 (一般單工)` / `自動偵測` |
+| | `a100_workers` | 當選擇 A100 時，一次同時處理幾個檔案 | `預設 (A100=4, 一般=1)`（支援下拉選擇 1~8） |
 | | `lang` | 語言設定 | `Chinese` |
 | | `initial_prompt` | 提示詞（Whisper 專用，引導專有名詞） | `以下是繁體中文的句子` |
 | **3. 排版與折行** | `verbose` | 是否即時輸出解譯文字 | `True` |
-| | `max_words_per_line` | 每行字幕最大字數（>0 時自動啟用單字時間戳折行） | `0` (例如：`18`) |
-| | `max_line_width` | 每行字幕最大寬度（>0 時自動啟用單字時間戳折行） | `0` |
-| | `max_line_count` | 單個字幕塊最大行數 | `1` |
+| | `max_words_per_line` | 每行字幕最大字數（>0 時自動啟用單字時間戳折行） | `0` |
+| | `max_line_width` | 每行字幕最大寬度（依模型自動設定：`asadfgglie` 為 `18`，其他模型為 `0`） | `0` |
+| | `max_line_count` | 單個字幕塊最大行數（依模型自動設定：`asadfgglie` 為 `1`，其他模型為 `0`） | `0` |
 | | `word_timestamps` | 是否強制啟用單字級時間戳 | `False` |
 | | `merge_same_text` | 是否自動合併相鄰且文字相同的字幕行（同 SubtitleEdit 功能） | `True` |
 | | `merge_same_time` | 是否自動合併時間相同的字幕行（同 SubtitleEdit 功能） | `True` |
