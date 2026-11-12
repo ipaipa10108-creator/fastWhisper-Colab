@@ -75,9 +75,9 @@ if not shutil.which('ffmpeg'):
     except Exception:
         subprocess.run(["apt-get", "install", "-y", "-qq", "ffmpeg"], check=False)
 
-# 升級 yt-dlp
-print(">> 正在檢查並更新 yt-dlp 至最新版本...")
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "yt-dlp"])
+# 升級 yt-dlp (含 yt-dlp-ejs 挑戰解算元件，解決有 Cookie 卻無法解算串流格式的問題)
+print(">> 正在檢查並更新 yt-dlp (含 yt-dlp-ejs) 至最新版本...")
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "yt-dlp[default]", "yt-dlp-ejs"])
 print(">> yt-dlp 更新完成。")
 
 # 免重啟動態安裝與載入機制
@@ -335,10 +335,10 @@ LAST_YTDLP_TIME = 0.0
 
 def _get_js_runtime_args():
     if shutil.which("node"):
-        return ["--js-runtimes", "node"]
+        return ["--js-runtimes", "node", "--remote-components", "ejs:github"]
     if shutil.which("deno"):
-        return ["--js-runtimes", "deno"]
-    return []
+        return ["--js-runtimes", "deno", "--remote-components", "ejs:github"]
+    return ["--remote-components", "ejs:github"]
 
 def _find_cookie_file():
     candidates = [
@@ -353,27 +353,61 @@ def _find_cookie_file():
     return None
 
 def _validate_youtube_cookie(cookie_path):
-    """檢查 cookies.txt 是否包含已登入的 YouTube 認證欄位，若為未登入無痕 Cookie 則發出警告"""
+    """檢查 cookies.txt 是否包含屬於 .youtube.com 網域的已登入認證欄位"""
     if not cookie_path or not os.path.isfile(cookie_path):
-        return False
+        return False, "找不到 cookies.txt 檔案"
     try:
         with open(cookie_path, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
-        auth_keys = ["SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID", "LOGIN_INFO", "SID"]
-        has_auth = any(f"\t{k}\t" in content for k in auth_keys)
-        return has_auth
+            lines = f.readlines()
+
+        auth_keys = {
+            "SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID",
+            "LOGIN_INFO", "SID", "__Secure-1PSID", "__Secure-3PSID"
+        }
+        has_yt_domain = False
+        has_yt_auth = False
+        has_google_auth = False
+
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 7:
+                domain, name = parts[0].lower(), parts[5]
+                if "youtube.com" in domain:
+                    has_yt_domain = True
+                    if name in auth_keys:
+                        has_yt_auth = True
+                elif "google.com" in domain and name in auth_keys:
+                    has_google_auth = True
+
+        if has_yt_auth:
+            return True, "OK"
+        if not has_yt_domain and has_google_auth:
+            return False, (
+                "您的 cookies.txt 只有 google.com (或 Colab) 的 Cookie，完全沒有 youtube.com 的 Cookie！\n"
+                "   👉 您可能是在 Google Colab 或 Google 搜尋分頁上點擊了匯出，而非在 YouTube 分頁上匯出。"
+            )
+        return False, (
+            "您的 cookies.txt 中缺少 YouTube 登入憑證 (SAPISID / LOGIN_INFO / __Secure-1PSID)！\n"
+            "   👉 您可能在開了「無痕視窗」後『沒有先登入 YouTube 帳號』就直接匯出了訪客 Cookie。"
+        )
     except Exception:
-        return True
+        return True, "OK"
 
 COOKIE_CHECKED = False
 
 def getYoutubePlaylistInfo_ydl(url):
     ydl_opts = {'no_warnings': True, 'quiet': True, 'extract_flat': True}
     cookie_file = _find_cookie_file()
-    if cookie_file:
-        ydl_opts['cookiefile'] = cookie_file
-    with YoutubeDL(ydl_opts) as ydl:
-        return ydl.extract_info(url, download=False)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        if cookie_file:
+            temp_cookie = os.path.join(temp_dir, "playlist_cookies.txt")
+            shutil.copy2(cookie_file, temp_cookie)
+            ydl_opts['cookiefile'] = temp_cookie
+        with YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=False)
 
 def getAudioFromYoutube_ydl(url, output_path, outputFilename):
     global LAST_YTDLP_TIME, COOKIE_CHECKED
@@ -383,12 +417,15 @@ def getAudioFromYoutube_ydl(url, output_path, outputFilename):
     with YTDLP_LOCK:
         if cookie_file and not COOKIE_CHECKED:
             COOKIE_CHECKED = True
-            if not _validate_youtube_cookie(cookie_file):
+            is_valid_cookie, cookie_msg = _validate_youtube_cookie(cookie_file)
+            if not is_valid_cookie:
                 print(
-                    "⚠️ [重要警告] 偵測到您的 cookies.txt 中缺少 YouTube 登入憑證 (SAPISID / LOGIN_INFO)！\n"
-                    "   👉 您可能在開了「無痕視窗」後『沒有先登入 Google/YouTube 帳號』就直接匯出了 Cookie。\n"
-                    "   👉 未登入的訪客 Cookie 無法通過 YouTube 的機器人驗證 (HTTP 429 / Sign in to confirm you're not a bot)。\n"
-                    "   👉 正確步驟：開無痕視窗 -> 登入 YouTube 帳號 -> 匯出 cookies.txt -> 立刻直接關閉無痕視窗（千萬別按登出）。"
+                    f"⚠️ [重要警告] {cookie_msg}\n"
+                    "   👉 正確匯出步驟：\n"
+                    "      1. 開啟全新的「無痕視窗 (Incognito)」並登入 https://www.youtube.com\n"
+                    "      2. 在同一個無痕分頁前往 https://www.youtube.com/robots.txt (防止背景腳本刷新 Token)\n"
+                    "      3. 點擊 Get cookies.txt LOCALLY 匯出 cookies.txt\n"
+                    "      4. 立刻直接關閉無痕視窗（千萬不要按登出，也不要繼續使用該視窗）"
                 )
 
         elapsed = time.time() - LAST_YTDLP_TIME
@@ -399,7 +436,7 @@ def getAudioFromYoutube_ydl(url, output_path, outputFilename):
         with tempfile.TemporaryDirectory() as temp_dir:
             base_command = [
                 "yt-dlp",
-                "-f", "ba/b",
+                "-f", "ba/b*",
                 "--no-playlist",
                 "--write-info-json",
                 "--force-ipv4",
@@ -409,33 +446,55 @@ def getAudioFromYoutube_ydl(url, output_path, outputFilename):
             temp_cookie = None
             if cookie_file:
                 temp_cookie = os.path.join(temp_dir, "cookies_copy.txt")
-                shutil.copy2(cookie_file, temp_cookie)
                 print(f">> 偵測到 {cookie_file}，將使用獨立 Cookie 副本進行下載...")
 
-            # 嘗試兩種策略：
-            # 策略 1: 帶有 Cookie 時使用預設 web/tv client
-            # 策略 2: 若失敗或無 Cookie，切換為比較不易觸發 429 網頁阻擋的移动端/嵌合端 client
-            attempts = []
+            # 建立下載策略清單：(是否使用 Cookie, 額外參數)
+            attempt_configs = []
             if temp_cookie:
-                attempts.append(base_command + ["--cookies", temp_cookie, url])
-                attempts.append(base_command + ["--cookies", temp_cookie, "--extractor-args", "youtube:player_client=tv,mweb,web", url])
-            attempts.append(base_command + ["--extractor-args", "youtube:player_client=ios,android,mweb", url])
+                attempt_configs.append((True, []))
+                attempt_configs.append((True, ["--extractor-args", "youtube:player_client=tv,web,mweb"]))
+            attempt_configs.append((False, ["--extractor-args", "youtube:player_client=ios,android,tv_embedded"]))
 
             last_result = None
-            for attempt_idx, cmd in enumerate(attempts):
+            primary_cookie_stderr = None
+
+            for attempt_idx, (use_cookie, extra_args) in enumerate(attempt_configs):
                 if attempt_idx > 0:
                     time.sleep(2.0)
+
+                cmd = list(base_command)
+                if use_cookie and temp_cookie and cookie_file:
+                    # 每次重試都重新從原始 cookies.txt 複製乾淨副本，防止前一次失敗改寫壞 Cookie
+                    shutil.copy2(cookie_file, temp_cookie)
+                    cmd.extend(["--cookies", temp_cookie])
+                cmd.extend(extra_args)
+                cmd.append(url)
+
                 last_result = subprocess.run(cmd, capture_output=True, text=True)
                 LAST_YTDLP_TIME = time.time()
+
+                if use_cookie and primary_cookie_stderr is None and last_result.returncode != 0:
+                    primary_cookie_stderr = last_result.stderr
+
                 if last_result.returncode == 0:
                     break
 
             if last_result.returncode != 0:
+                # 優先顯示有帶 Cookie 時的真實錯誤訊息，避免被最後一次無 Cookie fallback 的錯誤訊息覆蓋而誤導使用者
+                err_msg = primary_cookie_stderr if primary_cookie_stderr else last_result.stderr
+                if temp_cookie and "Sign in to confirm" in (err_msg or ""):
+                    err_msg = (
+                        f"{err_msg.strip()}\n\n"
+                        "💡 [診斷提示] 系統已傳入 cookies.txt，但仍被 YouTube 判定未登入或憑證失效！常見原因：\n"
+                        "1. 您可能是在「一般視窗」匯出 Cookie 後繼續瀏覽 YouTube，導致 YouTube 自動輪替了連線憑證 (__Secure-1PSIDTS)，使舊的 cookies.txt 瞬間失效。\n"
+                        "2. 您可能是在 Google Colab 分頁而非 YouTube 分頁點擊匯出，導致檔案內沒有 .youtube.com 的登入憑證。\n"
+                        "✅ 解決方式：請開「無痕視窗」-> 登入 YouTube -> 網址改輸入 https://www.youtube.com/robots.txt -> 匯出 cookies.txt -> 立刻關閉無痕視窗並重新上傳。"
+                    )
                 raise subprocess.CalledProcessError(
                     last_result.returncode,
                     last_result.args,
                     output=last_result.stdout,
-                    stderr=last_result.stderr
+                    stderr=err_msg
                 )
 
             all_files = os.listdir(temp_dir)
